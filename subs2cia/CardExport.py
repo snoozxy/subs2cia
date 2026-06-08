@@ -7,11 +7,23 @@ from typing import List, Union
 from pathlib import Path
 import concurrent.futures
 import csv
+import json
 import logging
 import os
 import tqdm
 import unicodedata as ud
 from collections import defaultdict
+
+_HW_CACHE_PATH = Path.home() / ".dojo_hw_cache.json"
+
+
+def _load_hw_cache():
+    """Return recommendations dict from ~/.dojo_hw_cache.json, or {}."""
+    try:
+        with open(_HW_CACHE_PATH, encoding="utf-8") as f:
+            return json.load(f).get("recommendations", {})
+    except Exception:
+        return {}
 
 class CardExport(Common):
     def __init__(self, sources: List[AVSFile], outdir: Path, outstem: Union[str, None], condensed_video: bool, padding: int,
@@ -187,14 +199,16 @@ class CardExport(Common):
 
         # ── Pass 2: export media in parallel (one thread per card) ────────────
         # ffmpeg subprocesses are I/O-bound relative to Python; threads work well.
-        # Cap at 4 workers — more rarely helps and can saturate disk on spinning
-        # drives or cause ffmpeg processes to compete for decode bandwidth.
         audio_file = (
             self.picked_streams['audio'].demux_file.filepath if export_audio else None
         )
         video_file = (
             self.picked_streams['video'].file.filepath if (export_screenshot or export_video) else None
         )
+
+        # Resolve hwaccel: env var > hw cache > none
+        _hw_accel = os.environ.get("SUBS2CIA_HWACCEL") or _load_hw_cache().get("SUBS2CIA_HWACCEL", "")
+        _hwaccel = _hw_accel if _hw_accel and _hw_accel.lower() not in ("", "none", "off") else None
 
         def export_card_media(row):
             group = row['_group']
@@ -224,6 +238,7 @@ class CardExport(Common):
                         outpath=outpath,
                         w=-1,
                         h=-1,
+                        hwaccel=_hwaccel,
                     )
             if export_video:
                 outpath = row['_video_outpath']
@@ -238,12 +253,14 @@ class CardExport(Common):
                         outpath=outpath,
                     )
 
-        # Scale workers to available CPU cores. Override with SUBS2CIA_WORKERS env var.
+        # Scale workers: env var > hw cache > cpu_count
         _env_workers = os.environ.get("SUBS2CIA_WORKERS", "")
         if _env_workers.isdigit():
             n_workers = min(int(_env_workers), len(rows)) if rows else 1
         else:
-            n_workers = min(os.cpu_count() or 4, len(rows)) if rows else 1
+            _cached_workers = _load_hw_cache().get("SUBS2CIA_WORKERS", "")
+            _base = int(_cached_workers) if str(_cached_workers).isdigit() else (os.cpu_count() or 4)
+            n_workers = min(_base, len(rows)) if rows else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(export_card_media, row): i for i, row in enumerate(rows)}
             for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(rows), desc="Exporting cards"):
