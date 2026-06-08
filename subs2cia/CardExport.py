@@ -25,6 +25,28 @@ def _load_hw_cache():
     except Exception:
         return {}
 
+
+def _resolve_card_workers(hw_cache: dict, row_count: int, episode_jobs: int = 1) -> int:
+    """Resolve per-episode card export worker count."""
+    if row_count == 0:
+        return 1
+
+    env_workers = os.environ.get("SUBS2CIA_WORKERS", "")
+    if env_workers.isdigit():
+        base_workers = int(env_workers)
+    else:
+        cached_workers = hw_cache.get("SUBS2CIA_WORKERS", "")
+        if str(cached_workers).isdigit():
+            base_workers = int(cached_workers)
+        else:
+            base_workers = os.cpu_count() or 4
+
+    if episode_jobs > 1:
+        base_workers = max(1, base_workers // episode_jobs)
+
+    return min(base_workers, row_count)
+
+
 class CardExport(Common):
     def __init__(self, sources: List[AVSFile], outdir: Path, outstem: Union[str, None], condensed_video: bool, padding: int,
                  demux_overwrite_existing: bool, overwrite_existing_generated: bool,
@@ -42,6 +64,7 @@ class CardExport(Common):
                  no_export_screenshot: bool,
                  export_video: bool,
                  export_header_row: bool,
+                 episode_jobs: int = 1,
                  ):
         super(CardExport, self).__init__(
             sources=sources,
@@ -75,11 +98,31 @@ class CardExport(Common):
         self.export_screenshot = not no_export_screenshot
         self.export_video = export_video
         self.export_header_row = export_header_row
+        self.episode_jobs = max(1, episode_jobs)
 
         self.subdata = None
 
         # This is set to True later if there aren't any usable subtitles
         self.insufficient = False
+
+    def choose_audio(self, interactive: bool):
+        """Pick audio without demuxing — srs clips read directly from the source container."""
+        if len(self.partitioned_streams['audio']) == 0:
+            logging.warning(f"Couldn't find audio streams in input files")
+            return
+
+        k = 'audio'
+        while self.picked_streams[k] is None:
+            if interactive and len(self.partitioned_streams['audio']) > 1:
+                self.picked_streams['audio'] = interactive_picker(
+                    self.sources, self.partitioned_streams, 'audio')
+            else:
+                try:
+                    self.picked_streams[k] = next(self.pickers[k])
+                except StopIteration:
+                    logging.critical("Inputs don't contain usable audio")
+                    self.insufficient = True
+                    return
 
     def choose_subtitle(self, interactive):
         if len(self.partitioned_streams['subtitle']) == 0:
@@ -108,7 +151,7 @@ class CardExport(Common):
                 logging.warning(f"Error while demuxing {self.picked_streams[k]}")
                 self.picked_streams[k] = None
 
-            audiolength = subtools.get_audiofile_duration(self.picked_streams['audio'].demux_file.filepath)
+            audiolength = self.picked_streams['audio'].get_duration_ms()
             subdata = subtools.SubtitleManipulator(subfile.filepath,
                                                    threshold=0, padding=self.padding,
                                                    ignore_range=ignore_range, audio_length=audiolength)
@@ -199,15 +242,19 @@ class CardExport(Common):
 
         # ── Pass 2: export media in parallel (one thread per card) ────────────
         # ffmpeg subprocesses are I/O-bound relative to Python; threads work well.
+        hw_cache = _load_hw_cache()
         audio_file = (
-            self.picked_streams['audio'].demux_file.filepath if export_audio else None
+            self.picked_streams['audio'].get_source_path() if export_audio else None
+        )
+        audio_stream_index = (
+            self.picked_streams['audio'].get_ffmpeg_stream_index() if export_audio else 0
         )
         video_file = (
             self.picked_streams['video'].file.filepath if (export_screenshot or export_video) else None
         )
 
         # Resolve hwaccel: env var > hw cache > none
-        _hw_accel = os.environ.get("SUBS2CIA_HWACCEL") or _load_hw_cache().get("SUBS2CIA_HWACCEL", "")
+        _hw_accel = os.environ.get("SUBS2CIA_HWACCEL") or hw_cache.get("SUBS2CIA_HWACCEL", "")
         _hwaccel = _hw_accel if _hw_accel and _hw_accel.lower() not in ("", "none", "off") else None
 
         def export_card_media(row):
@@ -219,7 +266,7 @@ class CardExport(Common):
                 else:
                     ffmpeg_trim_audio_clip_atrim_encode(
                         input_file=audio_file,
-                        stream_index=0,
+                        stream_index=audio_stream_index,
                         timestamp_start=group.group_range[0],
                         timestamp_end=group.group_range[1],
                         quality=self.quality,
@@ -253,17 +300,11 @@ class CardExport(Common):
                         outpath=outpath,
                     )
 
-        # Scale workers: env var > hw cache > cpu_count
-        _env_workers = os.environ.get("SUBS2CIA_WORKERS", "")
-        if _env_workers.isdigit():
-            n_workers = min(int(_env_workers), len(rows)) if rows else 1
-        else:
-            _cached_workers = _load_hw_cache().get("SUBS2CIA_WORKERS", "")
-            _base = int(_cached_workers) if str(_cached_workers).isdigit() else (os.cpu_count() or 4)
-            n_workers = min(_base, len(rows)) if rows else 1
+        n_workers = _resolve_card_workers(hw_cache, len(rows), self.episode_jobs)
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(export_card_media, row): i for i, row in enumerate(rows)}
-            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(rows), desc="Exporting cards"):
+            desc = f"Exporting cards ({self.outstem})"
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(rows), desc=desc):
                 try:
                     future.result()
                 except Exception as e:

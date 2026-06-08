@@ -226,6 +226,13 @@ def get_args_subs2cia():
     parent_parser.add_argument('-ma', '--interactive', action='store_true', dest='interactive', default=False,
                                help='If set, will enable interactive stream picking. Overrides -ai, -si, -tl.')
 
+    parent_parser.add_argument('-j', '--jobs', metavar='<count>', dest='jobs', default=None,
+                               type=int,
+                               help='Number of input groups (episodes) to process in parallel. '
+                                    'Defaults to SUBS2CIA_JOBS env var, then ~/.dojo_hw_cache.json, '
+                                    'then 1. When >1, per-episode card workers are scaled down to avoid '
+                                    'oversubscribing CPU.')
+
     cia_parser = subparsers.add_parser('condense', parents=[parent_parser],
                                        help="Compress input audio/video into a shorter file",
                                        description="Compress input audio/video into a shorter file")

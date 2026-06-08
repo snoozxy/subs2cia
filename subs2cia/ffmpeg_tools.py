@@ -505,17 +505,14 @@ def ffmpeg_trim_audio_clip_atrim_encode(input_file: Path, stream_index: int, tim
     :param silent: If set, suppresses stderr.
     :return: FFmpeg stdout data if capture_stdout is set
     """
-    input_stream = ffmpeg.input(str(input_file))
+    duration_s = (timestamp_end - timestamp_start) / 1000
+    input_stream = ffmpeg.input(str(input_file), ss=timestamp_start / 1000)
     input_stream = input_stream[str(stream_index)]
-
-    input_stream = input_stream.filter("atrim",
-                                     start=timestamp_start/1000,
-                                     end=timestamp_end/1000).filter("asetpts", "PTS-STARTPTS")
 
     if normalize_audio:
         input_stream = input_stream.filter("loudnorm", print_format="summary")
 
-    kwargs = {}
+    kwargs = {'t': duration_s}
 
     if outpath.suffix.lower() == ".mp3":
         if quality is not None:
@@ -530,17 +527,14 @@ def ffmpeg_trim_audio_clip_atrim_encode(input_file: Path, stream_index: int, tim
         kwargs['format'] = format
     input_stream = ffmpeg.output(input_stream, str(outpath), **kwargs)
 
-
     input_stream = ffmpeg.overwrite_output(input_stream)
-    args = input_stream.get_args()
-    # logging.debug(f"ffmpeg_trim_audio_clip: args: {args}")
     try:
         stdout, stderr = ffmpeg.run(input_stream, capture_stdout=capture_stdout, capture_stderr=silent)
     except Exception as e:
         logging.error(
             f"ffmpeg couldn't trim audio clip. ffmpeg output: \n" + e.stderr.decode("utf-8"))
         raise e
-    # return stdout
+    return stdout
 
 
 # buggy, dont use

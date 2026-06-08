@@ -33,6 +33,6 @@ def picker(streams: [Stream], target_lang: str = None, forced_stream: int = None
     for s in streams:
         if s.is_standalone():
             continue
-        if s.get_language == target_lang:
+        if s.get_language() == target_lang:
             continue
         yield s

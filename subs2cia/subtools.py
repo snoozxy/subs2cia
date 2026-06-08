@@ -620,23 +620,29 @@ def get_partitioned_and_split_times_duration(sub_times):
 #     return audio_total
 
 
-def get_audiofile_duration(audiofile: Path):
-    stream_idx = 0
+def duration_ms_from_stream_info(stream_info: dict) -> int:
+    """Return stream duration in milliseconds from ffprobe stream metadata."""
+    if stream_info is None:
+        raise ValueError("stream_info is required")
+    if 'duration_ts' in stream_info and 'time_base' in stream_info:
+        sps = int(stream_info['time_base'].split('/')[1])
+        samples = stream_info['duration_ts']
+        return int(samples / sps * 1000)
+    if 'duration' in stream_info:
+        return int(float(stream_info['duration']) * 1000)
+    raise ValueError("ffprobe stream info has no duration")
+
+
+def get_audiofile_duration(audiofile: Path, stream_idx: int = 0):
     audio_info = ffmpeg.probe(str(audiofile), cmd='ffprobe')
-    sps = int(
-        audio_info['streams'][stream_idx]['time_base'].split('/')[1])  # audio samples per second, inverse of sampling frequency
-    samples = audio_info['streams'][stream_idx]['duration_ts']  # total samples in audio track
-    audio_total = samples / sps * 1000
-    return audio_total
+    return duration_ms_from_stream_info(audio_info['streams'][stream_idx])
 
 
-def get_compression_ratio(sub_times, audiofile: Path, verbose=True):
-    # audio_info = ffmpeg.probe(str(audiofile), cmd='ffprobe')
-    # sps = int(
-    #     audio_info['streams'][0]['time_base'].split('/')[1])  # audio samples per second, inverse of sampling freq
-    # samples = audio_info['streams'][0]['duration_ts']  # total samples in audio track
-    # audio_total = samples / sps * 1000
-    audio_total = get_audiofile_duration(audiofile)
+def get_compression_ratio(sub_times, audiofile: Path, verbose=True, duration_ms: Union[int, None] = None):
+    if duration_ms is None:
+        audio_total = get_audiofile_duration(audiofile)
+    else:
+        audio_total = duration_ms
     # total = list()
     # for split in sub_times:
     #     for partition in split:

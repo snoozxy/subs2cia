@@ -177,6 +177,24 @@ class Stream:
             logging.info(f"Deleting temporary file {str(self.demux_file.filepath)}")
             self.demux_file.filepath.unlink()
 
+    def get_source_path(self) -> Path:
+        """Path to the original input file (container or standalone media)."""
+        return self.file.filepath
+
+    def get_ffmpeg_stream_index(self) -> int:
+        """Stream index to pass to ffmpeg when reading from the source container."""
+        return 0 if self.index is None else self.index
+
+    def get_duration_ms(self) -> int:
+        """Return stream duration in milliseconds from cached ffprobe metadata."""
+        from subs2cia.subtools import duration_ms_from_stream_info
+
+        if self.is_standalone():
+            if self.file.info is None or 'streams' not in self.file.info:
+                raise ValueError(f"No probe data for {self.file.filepath}")
+            return duration_ms_from_stream_info(self.file.info['streams'][0])
+        return duration_ms_from_stream_info(self.stream_info)
+
     # return a readable path to the data
     def get_data_path(self) -> Path:
         if self.is_standalone() or self.type == 'video':

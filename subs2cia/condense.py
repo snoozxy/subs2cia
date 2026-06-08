@@ -105,7 +105,7 @@ class Condense(Common):
 
             assert(self.picked_streams['audio'] is not None)  # must call choose_audio first
             ignore_range = (self.ignore_range or []) + chapter_timestamps(self.picked_streams['audio'].file, self.ignore_chapters or [])
-            audiolength = subtools.get_audiofile_duration(self.picked_streams['audio'].demux_file.filepath)
+            audiolength = self.picked_streams['audio'].get_duration_ms()
             subdata = subtools.SubtitleManipulator(subfile.filepath,
                                                    threshold=self.threshold, padding=self.padding,
                                                    ignore_range=ignore_range, audio_length=audiolength)
@@ -203,7 +203,11 @@ class Condense(Common):
     def export(self):
         if self.insufficient:
             return
-        subtools.get_compression_ratio(self.dialogue_times, self.picked_streams['audio'].demux_file.filepath)
+        subtools.get_compression_ratio(
+            self.dialogue_times,
+            self.picked_streams['audio'].demux_file.filepath,
+            duration_ms=self.picked_streams['audio'].get_duration_ms(),
+        )
         if self.condensed_subtitles:
             self.export_subtitles()
         if self.condensed_audio:

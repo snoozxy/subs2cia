@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 import shutil
 import glob
+import concurrent.futures
 
 # this line is for when main.py is run directly
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,6 +20,8 @@ from colorlog import ColoredFormatter
 from pprint import pprint
 from typing import Union, List
 import tqdm
+
+_HW_CACHE_PATH = Path.home() / ".dojo_hw_cache.json"
 
 presets = [
     {  # preset 0
@@ -59,6 +63,59 @@ class TqdmLoggingHandler(logging.Handler):
             self.handleError(record)
 
 
+def _load_hw_cache():
+    try:
+        with open(_HW_CACHE_PATH, encoding="utf-8") as f:
+            return json.load(f).get("recommendations", {})
+    except Exception:
+        return {}
+
+
+def resolve_episode_jobs(args: dict) -> int:
+    """Resolve how many input groups to process concurrently."""
+    env_jobs = os.environ.get("SUBS2CIA_JOBS", "")
+    if env_jobs.isdigit():
+        return max(1, int(env_jobs))
+    if args.get("jobs") is not None:
+        return max(1, args["jobs"])
+
+    cached_jobs = _load_hw_cache().get("SUBS2CIA_JOBS", "")
+    if str(cached_jobs).isdigit():
+        return max(1, int(cached_jobs))
+
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(cpu_count // 2, 4))
+
+
+def _process_condense_group(c, args, idx, total):
+    logging.info(f"({idx + 1}/{total}): {c.outstem}")
+    c.get_and_partition_streams()
+    c.initialize_pickers()
+    if args['dry_run']:
+        return
+    if args['list_streams']:
+        c.list_streams()
+        return
+    c.choose_streams()
+    c.export()
+    c.cleanup()
+
+
+def _process_srs_group(c, args):
+    c.get_and_partition_streams()
+    c.initialize_pickers()
+    if args['dry_run']:
+        return
+    if args['list_streams']:
+        c.list_streams()
+        return
+    c.choose_streams()
+    if c.insufficient:
+        return
+    c.export()
+    c.cleanup()
+
+
 def condense_start(args, groups: List[List[AVSFile]]):
     condense_args = {key: args[key] for key in
                      ['outdir', 'outstem', 'condensed_video', 'padding', 'threshold', 'partition', 'split',
@@ -77,32 +134,27 @@ def condense_start(args, groups: List[List[AVSFile]]):
             for cfile in cgroup.sources:
                 logging.info(f"    {cfile.filepath}")
 
-    # logging.root.addHandler(TqdmLoggingHandler())
-
-    i = condensed_files
-    # if logging.root.level == logging.INFO:
-    #     # logging level of WARNING means quiet output
-    #     # debug is too noisy for a progress bar to be _that_ useful
-    #     i = tqdm.tqdm(condensed_files, position=0)
-
-    for idx, c in enumerate(i):
-        # if logging.root.level == logging.INFO:
-        #     i.set_postfix_str(f"{c.outstem}")
-        #     i.update(0)
-        logging.info(f"({idx + 1}/{len(i)}): {c.outstem}")
-        c.get_and_partition_streams()
-        c.initialize_pickers()
-        if args['dry_run']:
-            continue
-        if args['list_streams']:
-            c.list_streams()
-            continue
-        c.choose_streams()
-        c.export()
-        c.cleanup()
+    episode_jobs = resolve_episode_jobs(args)
+    if episode_jobs > 1 and len(condensed_files) > 1 and not args['interactive']:
+        logging.info(f"Processing {len(condensed_files)} groups with {episode_jobs} parallel jobs")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=episode_jobs) as pool:
+            futures = {
+                pool.submit(_process_condense_group, c, args, idx, len(condensed_files)): c.outstem
+                for idx, c in enumerate(condensed_files)
+            }
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                                    desc="Condensing episodes"):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Condense failed for {futures[future]}: {e}")
+    else:
+        for idx, c in enumerate(condensed_files):
+            _process_condense_group(c, args, idx, len(condensed_files))
 
 
 def srs_export_start(args, groups: List[List[AVSFile]]):
+    episode_jobs = resolve_episode_jobs(args)
     srs_args = {key: args[key] for key in
                 ['outdir', 'outstem', 'condensed_video', 'padding', 'demux_overwrite_existing',
                  'overwrite_existing_generated', 'keep_temporaries', 'target_lang', 'out_audioext', 'use_all_subs',
@@ -110,7 +162,7 @@ def srs_export_start(args, groups: List[List[AVSFile]]):
                  'ignore_chapters',
                  'bitrate', 'mono_channel', 'interactive', "out_audiocodec",
 
-                 'normalize_audio', 
+                 'normalize_audio',
                  'media_dir',
                  'no_export_screenshot',
                  'no_export_audio',
@@ -119,22 +171,26 @@ def srs_export_start(args, groups: List[List[AVSFile]]):
 
                  ]
                 }
+    srs_args['episode_jobs'] = episode_jobs
 
     cardexport_group = [CardExport(g, **srs_args) for g in groups]
 
-    for c in cardexport_group:
-        c.get_and_partition_streams()
-        c.initialize_pickers()
-        if args['dry_run']:
-            continue
-        if args['list_streams']:
-            c.list_streams()
-            continue
-        c.choose_streams()
-        if c.insufficient:
-            continue
-        c.export()
-        c.cleanup()
+    if episode_jobs > 1 and len(cardexport_group) > 1 and not args['interactive']:
+        logging.info(f"Processing {len(cardexport_group)} groups with {episode_jobs} parallel jobs")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=episode_jobs) as pool:
+            futures = {
+                pool.submit(_process_srs_group, c, args): c.outstem
+                for c in cardexport_group
+            }
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(futures),
+                                    desc="Exporting episodes"):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"SRS export failed for {futures[future]}: {e}")
+    else:
+        for c in cardexport_group:
+            _process_srs_group(c, args)
 
 
 def start():
@@ -145,7 +201,6 @@ def start():
     args = vars(args)
 
     logconfig = False
-    ch = logging.StreamHandler()
     level = logging.NOTSET
     if args['debug']:
         level = logging.DEBUG
@@ -162,8 +217,7 @@ def start():
     else:
         format = "subs2cia:%(log_color)s%(levelname)s%(reset)s:%(message_log_color)s%(message)s"
 
-    ch.setLevel(level)
-    ch.setFormatter(ColoredFormatter(format, log_colors={
+    formatter = ColoredFormatter(format, log_colors={
         'DEBUG': 'cyan',
         'INFO': 'green',
         'WARNING': 'yellow',
@@ -174,7 +228,10 @@ def start():
             'ERROR': 'red',
             'CRITICAL': 'bold_red'
         }
-    }))
+    })
+    ch = TqdmLoggingHandler() if level <= logging.INFO else logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(formatter)
     logging.root.setLevel(level)
     logging.root.addHandler(ch)
 
