@@ -1,7 +1,7 @@
-import subs2cia
-
 def main():
-    subs2cia.main.start()
+    from subs2cia.main import start
+    start()
 
 def subzipper_main():
-    subs2cia.subzipper.start()
+    from subs2cia.subzipper import start
+    start()

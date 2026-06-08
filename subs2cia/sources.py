@@ -193,7 +193,16 @@ class Stream:
             if self.file.info is None or 'streams' not in self.file.info:
                 raise ValueError(f"No probe data for {self.file.filepath}")
             return duration_ms_from_stream_info(self.file.info['streams'][0])
-        return duration_ms_from_stream_info(self.stream_info)
+        try:
+            return duration_ms_from_stream_info(self.stream_info)
+        except ValueError:
+            # Per-stream duration unavailable (e.g. AAC audio in MKV from h264_amf transcode).
+            # Fall back to container format duration.
+            if self.file.info and 'format' in self.file.info:
+                fmt_dur = self.file.info['format'].get('duration')
+                if fmt_dur is not None:
+                    return int(float(fmt_dur) * 1000)
+            raise
 
     # return a readable path to the data
     def get_data_path(self) -> Path:
