@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] - snoozxy fork
+### Added
+ - `-j/--jobs` for parallel batch processing of multiple input groups (condense and srs)
+ - `SUBS2CIA_JOBS` env var and `~/.dojo_hw_cache.json` support for episode-level parallelism
+ - Unit tests for performance helpers (`subs2cia/tests/performance_helpers_test.py`)
+### Changed
+ - `srs` audio clips use input-side `-ss` seek instead of decoding from t=0 per card
+ - `srs` skips serial full-audio FLAC demux; clips read directly from source container via `-ai` stream index
+ - Per-episode card workers scale down when multiple episodes run in parallel
+ - Logging routed through `TqdmLoggingHandler` at INFO level for clean progress bars during parallel runs
+ - `get_compression_ratio` accepts optional `duration_ms` to avoid redundant ffprobe calls
+### Fixed
+ - `pickers.py` fallback language match (`get_language()` was missing call parentheses)
+
 ## [Unreleased] - mattvsjapan fork
 ### Added
  - Context column (7th TSV column) with surrounding subtitle lines for LLM-assisted language learning
