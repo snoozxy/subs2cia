@@ -5,6 +5,7 @@ from subs2cia.ffmpeg_tools import ffmpeg_trim_audio_clip_atrim_encode, ffmpeg_ge
 
 from typing import List, Union
 from pathlib import Path
+import concurrent.futures
 import csv
 import logging
 import tqdm
@@ -140,7 +141,7 @@ class CardExport(Common):
             media_dir = self.outdir
 
         # where to get screenshot. 0=start, 1=end, 0.5=middle
-        lbda = 0.0  
+        lbda = 0.0
 
         # we only need to worry about creating the media dir if we are exporting any media
         if export_audio or export_screenshot or export_video:
@@ -149,89 +150,108 @@ class CardExport(Common):
             if not media_dir.is_dir():
                 raise RuntimeError(f"Not a directory: {media_dir}")
 
+        # ── Pass 1: collect groups and pre-compute all row metadata ───────────
+        non_ephemeral_groups = [g for g in self.subdata.groups if not g.contains_only_ephemeral]
+        group_texts = [g.events[0].plaintext for g in non_ephemeral_groups]
 
-        # for each group, write a row to the csv (tsv) file.
-        # as we go, export media files (screenshots, clips) as needed
+        rows = []
+        for i, group in enumerate(non_ephemeral_groups):
+            media_stem = media_dir / (
+                ud.normalize('NFC', self.outstem).translate(forbidden_chars)
+                + f"_{group.group_range[0]}-{group.group_range[1]}"
+            )
+            start_idx = max(0, i - 15)
+            end_idx = min(len(group_texts), i + 16)
+            row = {
+                'text': group.events[0].plaintext,
+                'timestamps': f"{group.group_range[0]}-{group.group_range[1]}",
+                'sources': ",".join([s.filepath.name for s in self.sources]),
+                'context': 'Sentence context: ' + ' | '.join(group_texts[start_idx:end_idx]),
+                '_group': group,
+                '_media_stem': media_stem,
+            }
+            if export_audio:
+                outpath = Path(str(media_stem) + '.mp3')
+                row['audioclip'] = f"[sound:{outpath.name}]"
+                row['_audio_outpath'] = outpath
+            if export_screenshot:
+                outpath = Path(str(media_stem) + '.jpg')
+                row['screenclip'] = f"<img src='{outpath.name}'>"
+                row['_screenshot_outpath'] = outpath
+            if export_video:
+                outpath = Path(str(media_stem) + '.mp4')
+                row['videoclip'] = f"[sound:{outpath.name}]"
+                row['_video_outpath'] = outpath
+            rows.append(row)
 
+        # ── Pass 2: export media in parallel (one thread per card) ────────────
+        # ffmpeg subprocesses are I/O-bound relative to Python; threads work well.
+        # Cap at 4 workers — more rarely helps and can saturate disk on spinning
+        # drives or cause ffmpeg processes to compete for decode bandwidth.
+        audio_file = (
+            self.picked_streams['audio'].demux_file.filepath if export_audio else None
+        )
+        video_file = (
+            self.picked_streams['video'].file.filepath if (export_screenshot or export_video) else None
+        )
+
+        def export_card_media(row):
+            group = row['_group']
+            if export_audio:
+                outpath = row['_audio_outpath']
+                if outpath.exists():
+                    logging.warning(f"Already exists: {outpath}")
+                else:
+                    ffmpeg_trim_audio_clip_atrim_encode(
+                        input_file=audio_file,
+                        stream_index=0,
+                        timestamp_start=group.group_range[0],
+                        timestamp_end=group.group_range[1],
+                        quality=self.quality,
+                        to_mono=self.to_mono,
+                        normalize_audio=self.normalize_audio,
+                        outpath=outpath,
+                    )
+            if export_screenshot:
+                outpath = row['_screenshot_outpath']
+                if outpath.exists():
+                    logging.info(f"Already exists: {outpath}")
+                else:
+                    ffmpeg_get_frame_fast(
+                        video_file,
+                        timestamp=(1 - lbda) * group.group_range[0] + lbda * group.group_range[1],
+                        outpath=outpath,
+                        w=-1,
+                        h=-1,
+                    )
+            if export_video:
+                outpath = row['_video_outpath']
+                if outpath.exists():
+                    logging.info(f"Already exists: {outpath}")
+                else:
+                    ffmpeg_trim_video_clip_directcopy(
+                        video_file,
+                        timestamp_start=group.group_range[0],
+                        timestamp_end=group.group_range[1],
+                        quality=None,
+                        outpath=outpath,
+                    )
+
+        n_workers = min(4, len(rows)) if rows else 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(export_card_media, row): i for i, row in enumerate(rows)}
+            for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(rows), desc="Exporting cards"):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Card export failed: {e}")
+
+        # ── Pass 3: write TSV in original card order ───────────────────────────
+        private_keys = {'_group', '_media_stem', '_audio_outpath', '_screenshot_outpath', '_video_outpath'}
         with open(csv_outpath, 'w', encoding='utf-8', newline='') as f:
-
             csvw = csv.writer(f, delimiter='\t')
-
             if export_header_row:
                 csvw.writerow(csv_columns)
-
-            group_texts = [
-                g.events[0].plaintext
-                for g in self.subdata.groups
-                if not g.contains_only_ephemeral
-            ]
-
-            non_ephemeral_idx = 0
-            for group in tqdm.tqdm(self.subdata.groups):
-                # since subdata.merge_groups hasn't been called, each group only contains one SSAevent
-
-                if group.contains_only_ephemeral:
-                    continue
-
-                row = {
-                    'text': group.events[0].plaintext,
-                    'timestamps': f"{group.group_range[0]}-{group.group_range[1]}",
-                    'sources': ",".join([s.filepath.name for s in self.sources])
-                }
-
-                media_file_stem = media_dir / (ud.normalize('NFC', self.outstem).translate(forbidden_chars) + f"_{group.group_range[0]}-{group.group_range[1]}")
-
-                if export_audio:
-                    outpath = Path(str(media_file_stem) + '.mp3')
-                    row['audioclip'] = f"[sound:{outpath.name}]"
-
-                    if outpath.exists():
-                        logging.warning(f"Already exists: {outpath}")
-                    else:
-                        ffmpeg_trim_audio_clip_atrim_encode(
-                            input_file=self.picked_streams['audio'].demux_file.filepath,
-                            stream_index=0,
-                            timestamp_start=group.group_range[0],
-                            timestamp_end=group.group_range[1],
-                            quality=self.quality,
-                            to_mono=self.to_mono,
-                            normalize_audio=self.normalize_audio,
-                            outpath=outpath
-                        )
-
-                if export_screenshot:
-                    outpath = Path(str(media_file_stem) + '.jpg')
-                    row['screenclip'] = f"<img src='{outpath.name}'>"
-
-                    if outpath.exists():
-                        logging.info(f"Already exists: {outpath}")
-                    else:
-                        ffmpeg_get_frame_fast(
-                            self.picked_streams['video'].file.filepath,
-                            timestamp=(1-lbda) * group.group_range[0] + lbda * group.group_range[1],
-                            outpath=outpath,
-                            w=-1,
-                            h=-1
-                        )
-
-                if export_video:
-                    outpath = Path(str(media_file_stem) + '.mp4')
-                    row['videoclip'] = f"[sound:{outpath.name}]"
-
-                    if outpath.exists():
-                        logging.info(f"Already exists: {outpath}")
-                    else:
-                        ffmpeg_trim_video_clip_directcopy(
-                            self.picked_streams['video'].file.filepath,
-                            timestamp_start=group.group_range[0],
-                            timestamp_end=group.group_range[1], quality=None, outpath=outpath
-                        )
-
-                start_idx = max(0, non_ephemeral_idx - 15)
-                end_idx = min(len(group_texts), non_ephemeral_idx + 16)
-                row['context'] = 'Sentence context: ' + ' | '.join(group_texts[start_idx:end_idx])
-
+            for row in rows:
                 csvw.writerow([row.get(col, '') for col in csv_columns])
-
-                non_ephemeral_idx += 1
 
