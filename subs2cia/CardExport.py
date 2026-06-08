@@ -8,6 +8,7 @@ from pathlib import Path
 import concurrent.futures
 import csv
 import logging
+import os
 import tqdm
 import unicodedata as ud
 from collections import defaultdict
@@ -237,7 +238,12 @@ class CardExport(Common):
                         outpath=outpath,
                     )
 
-        n_workers = min(4, len(rows)) if rows else 1
+        # Scale workers to available CPU cores. Override with SUBS2CIA_WORKERS env var.
+        _env_workers = os.environ.get("SUBS2CIA_WORKERS", "")
+        if _env_workers.isdigit():
+            n_workers = min(int(_env_workers), len(rows)) if rows else 1
+        else:
+            n_workers = min(os.cpu_count() or 4, len(rows)) if rows else 1
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(export_card_media, row): i for i, row in enumerate(rows)}
             for future in tqdm.tqdm(concurrent.futures.as_completed(futures), total=len(rows), desc="Exporting cards"):

@@ -430,7 +430,8 @@ def ffmpeg_get_frame(videofile: Path, timestamp: int, outpath: Path):
 
 
 def ffmpeg_get_frame_fast(videofile: Path, timestamp: int, outpath: Path, w: int, h: int,
-                          format: Union[str, None] = None, capture_stdout: bool = False, silent: bool = True):
+                          format: Union[str, None] = None, capture_stdout: bool = False, silent: bool = True,
+                          hwaccel: Union[str, None] = None):
     r"""
     Gets a screenshot from a video file
     :param videofile: Path to input file containing a video stream
@@ -442,11 +443,18 @@ def ffmpeg_get_frame_fast(videofile: Path, timestamp: int, outpath: Path, w: int
     :param capture_stdout: If set to true, captures ffmpeg's stdout and returns as raw bytestream.
             Otherwise prints to stdout.
     :param silent: Suppresses stderr from printing if set. Useful for exporting many frames at a time.
+    :param hwaccel: Hardware accelerator for decoding (e.g. 'cuda', 'd3d11va'). Speeds up
+            seeking in long files. Reads SUBS2CIA_HWACCEL env var if not passed directly.
     :return:
     """
 
     # from https://stackoverflow.com/a/28321986
-    videostream = ffmpeg.input(str(videofile), ss=timestamp/1000)
+    if hwaccel is None:
+        hwaccel = os.environ.get("SUBS2CIA_HWACCEL", "")
+    hw_kwargs = {}
+    if hwaccel and hwaccel.lower() not in ("", "none", "off"):
+        hw_kwargs["hwaccel"] = hwaccel
+    videostream = ffmpeg.input(str(videofile), ss=timestamp/1000, **hw_kwargs)
     if w == -1 and h == -1:
         pass
     else:
