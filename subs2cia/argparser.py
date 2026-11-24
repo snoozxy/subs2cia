@@ -312,6 +312,17 @@ def get_args_subs2cia():
                             help="If set, the resulting TSV file will have a header row which contains the column names. "
                                  "This will make the file easier to read or reason about in a spreadsheet application, but "
                                  "Anki will import the header row as a useless card.")
+
+    srs_parser.add_argument('-j', '--workers', metavar='N', dest='workers', type=int, default=None,
+                            help="Number of parallel ffmpeg batch jobs (and per-card video workers). "
+                                 "Defaults to min(8, CPU count). Set to 1 for sequential export.")
+
+    srs_parser.add_argument('--batch-size', metavar='N', dest='batch_size', type=int, default=50,
+                            help="Number of cards per ffmpeg invocation when batch-exporting audio/screenshots. "
+                                 "Default 50.")
+
+    srs_parser.add_argument('--no-batch', action='store_true', dest='no_batch', default=False,
+                            help="Disable batched ffmpeg export; use one ffmpeg process per card (legacy).")
     args = parser.parse_args()
 
     # temporary patch until this feature is ready

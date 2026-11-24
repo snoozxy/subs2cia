@@ -168,6 +168,9 @@ def srs_export_start(args, groups: List[List[AVSFile]]):
                  'no_export_audio',
                  'export_video',
                  'export_header_row',
+                 'workers',
+                 'batch_size',
+                 'no_batch',
 
                  ]
                 }

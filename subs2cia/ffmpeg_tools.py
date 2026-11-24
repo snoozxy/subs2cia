@@ -558,3 +558,140 @@ def ffmpeg_trim_video_clip_directcopy(videofile: Path, timestamp_start: int, tim
 #  https://video.stackexchange.com/a/21738
 def ffmpeg_clip_video():
     pass
+
+
+def _run_ffmpeg_cmd(args: list, filter_complex: str = None) -> None:
+    """Run ffmpeg with optional filter_complex_script for long graphs (Windows)."""
+    if filter_complex and len(" ".join(args) + filter_complex) > 28000:
+        fp = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt')
+        fp.write(filter_complex)
+        fp.close()
+        args = args + ['-filter_complex_script', fp.name]
+        try:
+            _run_ffmpeg_cmd(args)
+        finally:
+            try:
+                os.unlink(fp.name)
+            except OSError:
+                pass
+        return
+
+    if filter_complex:
+        args = args + ['-filter_complex', filter_complex]
+
+    quiet = not logging.root.isEnabledFor(logging.DEBUG)
+    proc = subprocess.run(
+        args,
+        capture_output=quiet,
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b'').decode('utf-8', errors='replace')
+        raise Error('ffmpeg', proc.stdout, stderr.encode('utf-8'))
+
+
+def ffmpeg_batch_export_audio_clips(
+    input_file: Path,
+    stream_index: int,
+    clips: list,
+    quality: Union[int, None],
+    to_mono: bool,
+    normalize_audio: bool,
+) -> None:
+    """Export many audio clips in one ffmpeg invocation via filter_complex.
+
+    clips: list of (start_ms, end_ms, outpath Path)
+    """
+    clips_to_do = [(s, e, p) for s, e, p in clips if not Path(p).exists()]
+    if not clips_to_do:
+        return
+
+    chains = []
+    maps = []
+    for i, (start_ms, end_ms, outpath) in enumerate(clips_to_do):
+        start = start_ms / 1000.0
+        end = end_ms / 1000.0
+        label = f"a{i}"
+        chain = f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS"
+        if normalize_audio:
+            chain += ",loudnorm=print_format=summary"
+        if to_mono:
+            chain += ",aformat=channel_layouts=mono"
+        chains.append(f"{chain}[{label}]")
+        maps.extend(['-map', f'[{label}]', str(outpath)])
+
+    filter_complex = ';'.join(chains)
+    args = ['ffmpeg', '-y', '-i', str(input_file)]
+    args.extend(maps)
+    args.extend(['-acodec', 'libmp3lame'])
+    bitrate = f'{quality}k' if quality is not None else '320k'
+    args.extend(['-b:a', bitrate])
+
+    logging.debug(f"Batch audio export: {len(clips_to_do)} clips")
+    # filter_complex must appear before -map outputs
+    insert_at = 4  # after ffmpeg -y -i <file>
+    if len(' '.join(args) + filter_complex) > 28000:
+        fp = tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', delete=False, suffix='.txt')
+        fp.write(filter_complex)
+        fp.close()
+        args[insert_at:insert_at] = ['-filter_complex_script', fp.name]
+        try:
+            _run_ffmpeg_cmd(args)
+        finally:
+            try:
+                os.unlink(fp.name)
+            except OSError:
+                pass
+    else:
+        args[insert_at:insert_at] = ['-filter_complex', filter_complex]
+        _run_ffmpeg_cmd(args)
+
+
+def ffmpeg_batch_export_frames(
+    videofile: Path,
+    items: list,
+    w: int = -1,
+    h: int = -1,
+) -> None:
+    """Export many screenshots in one ffmpeg pass using a select filter.
+
+    items: list of (timestamp_ms, outpath Path) — renamed in timestamp order.
+    """
+    items_to_do = sorted(
+        [(ts, p) for ts, p in items if not Path(p).exists()],
+        key=lambda x: x[0],
+    )
+    if not items_to_do:
+        return
+
+    parts = []
+    for ts_ms, _ in items_to_do:
+        t = ts_ms / 1000.0
+        parts.append(f"between(t\\,{t:.3f}\\,{t + 0.04:.3f})")
+    select_expr = '+'.join(parts)
+
+    vf = f"select='{select_expr}'"
+    if w != -1 or h != -1:
+        sw = w if w != -1 else -1
+        sh = h if h != -1 else -1
+        vf += f",scale={sw}:{sh}"
+
+    with _tmpdir_scope() as tmpdir:
+        tmp_pattern = os.path.join(tmpdir, 'frame_%05d.jpg')
+        args = [
+            'ffmpeg', '-y',
+            '-i', str(videofile),
+            '-vf', vf,
+            '-vsync', 'vfr',
+            '-frames:v', str(len(items_to_do)),
+            tmp_pattern,
+        ]
+        logging.debug(f"Batch frame export: {len(items_to_do)} frames")
+        _run_ffmpeg_cmd(args)
+
+        for idx, (_, outpath) in enumerate(items_to_do):
+            src = os.path.join(tmpdir, f'frame_{idx + 1:05d}.jpg')
+            if os.path.isfile(src):
+                shutil.move(src, str(outpath))
+            else:
+                raise Error('ffmpeg', b'', f'Missing batch frame: {src}'.encode('utf-8'))

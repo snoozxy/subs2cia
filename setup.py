@@ -6,7 +6,7 @@ import os
 HERE = pathlib.Path(__file__).parent
 
 # The text of the README file
-long_description = (HERE / "README.md").read_text()
+long_description = (HERE / "README.md").read_text(encoding="utf-8")
 
 
 # from pip's setup.py:
@@ -15,7 +15,7 @@ def read(rel_path):
     here = os.path.abspath(os.path.dirname(__file__))
     # intentionally *not* adding an encoding option to open, See:
     #   https://github.com/pypa/virtualenv/issues/201#issuecomment-3145690
-    with open(os.path.join(here, rel_path)) as fp:
+    with open(os.path.join(here, rel_path), encoding="utf-8") as fp:
         return fp.read()
 
 
