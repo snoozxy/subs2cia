@@ -8,7 +8,7 @@ from tqdm import tqdm, TqdmWarning
 try:
     import gevent
     import gevent.monkey
-    gevent.monkey.patch_all(thread=False)
+    gevent.monkey.patch_all(thread=False, queue=False)
 except ImportError:
     gevent = None
     pass
